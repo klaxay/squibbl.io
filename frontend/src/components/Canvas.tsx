@@ -1,23 +1,24 @@
 import { useEffect, useRef, useState } from "react";
+import ColorPalette from "./ColorPalette";
 
 const Canvas: React.FC = () => {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const ctxRef = useRef<CanvasRenderingContext2D | null>(null);
   const [isDrawing, setIsDrawing] = useState(false);
+  const [selectedColor, setSelectedColor] = useState<string>("#000000");
   const socketRef = useRef<WebSocket | null>(null);
-  const lastPos = useRef<{ x: number; y: number } | null>(null); // Store last position
+  const lastPoints = useRef<{ x: number; y: number }[]>([]); // store stroke points
 
   useEffect(() => {
-    // Initialize WebSocket
     socketRef.current = new WebSocket("ws://localhost:5000");
 
     socketRef.current.onmessage = (event: MessageEvent) => {
       const data = JSON.parse(event.data);
 
       if (data.type === "draw") {
-        drawLine(data.x0, data.y0, data.x1, data.y1, data.color, false);
+        drawSmoothLine(data.path, data.color);
       } else if (data.type === "clear") {
-        clearCanvas(false); // Clear without emitting another event
+        clearCanvas(false);
       }
     };
 
@@ -38,54 +39,67 @@ const Canvas: React.FC = () => {
       ctxRef.current = ctx;
       ctx.lineWidth = 5;
       ctx.lineCap = "round";
+      ctx.lineJoin = "round";
     }
   }, []);
 
-  const drawLine = (
-    x0: number,
-    y0: number,
-    x1: number,
-    y1: number,
-    color: string,
-    emit: boolean = true
+  const drawSmoothLine = (
+    points: { x: number; y: number }[],
+    color: string
   ) => {
     const ctx = ctxRef.current;
-    if (!ctx) return;
+    if (!ctx || points.length < 3) return;
 
     ctx.strokeStyle = color;
     ctx.beginPath();
-    ctx.moveTo(x0, y0);
-    ctx.lineTo(x1, y1);
-    ctx.stroke();
+    ctx.moveTo(points[0].x, points[0].y);
 
-    if (!emit) return;
-    socketRef.current?.send(
-      JSON.stringify({ type: "draw", x0, y0, x1, y1, color })
-    );
+    for (let i = 1; i < points.length - 1; i++) {
+      const midPoint = {
+        x: (points[i].x + points[i + 1].x) / 2,
+        y: (points[i].y + points[i + 1].y) / 2,
+      };
+      ctx.quadraticCurveTo(points[i].x, points[i].y, midPoint.x, midPoint.y);
+    }
+
+    ctx.stroke();
   };
 
   const startDrawing = (e: React.MouseEvent<HTMLCanvasElement>) => {
     setIsDrawing(true);
-    lastPos.current = { x: e.clientX, y: e.clientY }; // Store initial position
+    lastPoints.current = [getMousePos(e)];
+  };
+
+  const draw = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    if (!isDrawing) return;
+    const currentPos = getMousePos(e);
+    lastPoints.current.push(currentPos);
+
+    if (lastPoints.current.length >= 3) {
+      drawSmoothLine(lastPoints.current, selectedColor);
+
+      socketRef.current?.send(
+        JSON.stringify({
+          type: "draw",
+          path: lastPoints.current,
+          color: selectedColor,
+        })
+      );
+
+      // keep last 2 points for continuity
+      lastPoints.current = lastPoints.current.slice(-2);
+    }
   };
 
   const stopDrawing = () => {
     setIsDrawing(false);
-    lastPos.current = null; // Reset last position
-  };
-
-  const draw = (e: React.MouseEvent<HTMLCanvasElement>) => {
-    if (!isDrawing || !lastPos.current) return;
-
-    drawLine(lastPos.current.x, lastPos.current.y, e.clientX, e.clientY, "black");
-
-    lastPos.current = { x: e.clientX, y: e.clientY }; // Update last position
+    lastPoints.current = [];
   };
 
   const clearCanvas = (emit: boolean = true) => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    
+
     const ctx = canvas.getContext("2d");
     if (ctx) {
       ctx.clearRect(0, 0, canvas.width, canvas.height);
@@ -96,16 +110,41 @@ const Canvas: React.FC = () => {
     }
   };
 
+  const getMousePos = (
+    e: React.MouseEvent<HTMLCanvasElement, MouseEvent>
+  ): { x: number; y: number } => {
+    const canvas = canvasRef.current;
+    if (!canvas) return { x: 0, y: 0 };
+
+    const rect = canvas.getBoundingClientRect();
+    return {
+      x: e.clientX - rect.left,
+      y: e.clientY - rect.top,
+    };
+  };
+
   return (
     <>
+      <div className="absolute top-4 left-4 z-10">
+        <ColorPalette
+          selectedColor={selectedColor}
+          onColorChange={setSelectedColor}
+        />
+        <button
+          onClick={() => clearCanvas()}
+          className="mt-2 px-4 py-1 bg-red-500 text-white rounded-md"
+        >
+          CLEAR
+        </button>
+      </div>
       <canvas
         ref={canvasRef}
         onMouseDown={startDrawing}
-        onMouseUp={stopDrawing}
         onMouseMove={draw}
-        style={{ background: "white" }}
+        onMouseUp={stopDrawing}
+        onMouseLeave={stopDrawing}
+        style={{ background: "white", display: "block" }}
       />
-      <button onClick={() => clearCanvas()}>CLEAR</button>
     </>
   );
 };
